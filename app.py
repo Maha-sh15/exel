@@ -3,8 +3,8 @@ import pandas as pd
 import streamlit as st
 from io import BytesIO
 
-st.set_page_config(page_title="نظام مطابقة وتصفية صفحة سداد", layout="wide")
-st.title("🔍 نظام مطابقة المدفوعات (تقسيم البيانات المختلفة حسب الملفات)")
+st.set_page_config(page_title="نظام المطابقة المتقدم", layout="wide")
+st.title("📊 نظام مطابقة المدفوعات وتصنيف الملفات التفصيلي")
 
 uploaded_files = st.file_uploader(
     "ارفع ملفات الإكسل للمطابقة", 
@@ -17,7 +17,6 @@ def smart_read_sadad_sheet(file):
     excel_file = pd.ExcelFile(file)
     sheet_names = excel_file.sheet_names
     
-    # البحث عن الورقة التي تحتوي على كلمة "سداد"
     target_sheet = None
     for sheet in sheet_names:
         if "سداد" in str(sheet).strip():
@@ -86,7 +85,7 @@ if uploaded_files and len(uploaded_files) > 1:
         combined_df = pd.concat(all_dfs, ignore_index=True)
         total_files = len(all_dfs)
 
-        # 1. عملية المطابقة
+        # 1. مطابقة البيانات المكتملة بالتفصيل
         record_counts = (
             combined_df.groupby(match_cols)["source_file"]
             .nunique()
@@ -94,10 +93,13 @@ if uploaded_files and len(uploaded_files) > 1:
         )
         final_df = pd.merge(combined_df, record_counts, on=match_cols, how="left")
 
+        # أ) بيانات متطابقة تماماً بكل الملفات
         existing_in_all = final_df[final_df["file_count"] == total_files].drop_duplicates(subset=match_cols)
-        not_in_all = final_df[final_df["file_count"] < total_files].drop_duplicates(subset=match_cols)
 
-        # الحسابات التي ظهرت في أكثر من ملف ولكن لا تملك تطابق كامل
+        # ب) تحديد الحسابات الفريدة وتواجدها حسب الملفات
+        account_presence = combined_df.groupby("account no.")["source_file"].unique().to_dict()
+        
+        # ج) تحديد الحسابات ذات البيانات المختلفة (توجد في أكثر من ملف ولكن بمبالغ/تواريخ مختلفة)
         acc_file_count = combined_df.groupby("account no.")["source_file"].nunique()
         acc_in_multiple_files = acc_file_count[acc_file_count > 1].index
         
@@ -106,12 +108,7 @@ if uploaded_files and len(uploaded_files) > 1:
             (~combined_df["account no."].isin(existing_in_all["account no."]))
         ]
 
-        st.success("✅ تمت المعالجة وتقسيم البيانات المختلفة حسب اسم كل ملف بنجاح!")
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("موجودين في كل الملفات", len(existing_in_all))
-        col2.metric("موجودين في بعض الملفات", len(not_in_all))
-        col3.metric("إجمالي الحسابات التي بها اختلافات", len(different_data))
+        st.success("✅ تم تصنيف البيانات بدقة وإنشاء التقرير بالتسميات المطلوبة!")
 
         export_rename = {
             "account no.": "Account No.",
@@ -119,35 +116,51 @@ if uploaded_files and len(uploaded_files) > 1:
             "payment date": "Payment Date"
         }
 
-        # إنشاء ملف الإكسل والتصدير
+        # بناء ملف الإكسل النهائي
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            # 1. شيت الموجودين بجميع الملفات
-            existing_in_all.drop(columns=["source_file", "file_count"], errors="ignore").rename(columns=export_rename).to_excel(writer, sheet_name="موجود بكل الملفات", index=False)
             
-            # 2. شيت الموجودين ببعض الملفات
-            not_in_all.drop(columns=["source_file", "file_count"], errors="ignore").rename(columns=export_rename).to_excel(writer, sheet_name="موجود ببعض الملفات", index=False)
+            # 1. الشيت الرئيسي: بيانات بكل الملفات
+            existing_in_all.drop(columns=["source_file", "file_count"], errors="ignore").rename(columns=export_rename).to_excel(
+                writer, sheet_name="بيانات بكل الملفات", index=False
+            )
             
-            # 3. إنشاء صفحة لكل ملف للبيانات المختلفة فقط
+            # 2. الشيتات الفرعية: بيانات توجد في (اسم الملف) فقط
+            for file_obj in uploaded_files:
+                file_name = file_obj.name
+                clean_file_name = str(file_name).replace(".xlsx", "").replace(".xls", "")
+                
+                # تصفية الحسابات التي لم تظهر سوى في هذا الملف حصراً
+                only_in_this_file = combined_df[
+                    combined_df["account no."].apply(lambda acc: list(account_presence.get(acc, [])) == [file_name])
+                ]
+                
+                sheet_title_only = f"بيانات في {clean_file_name} فقط"[:31]
+                only_in_this_file.drop(columns=["source_file"], errors="ignore").rename(columns=export_rename).to_excel(
+                    writer, sheet_name=sheet_title_only, index=False
+                )
+
+            # 3. الشيتات الفرعية: بيانات مختلفة في (اسم الملف)
             if not different_data.empty:
-                for file_name, group_df in different_data.groupby("source_file"):
-                    # تقليم اسم الشيت لأن إكسل يمنع الأسماء الأطول من 31 حرفاً وتجنب الرموز غير المسموحة
-                    safe_sheet_name = str(file_name).replace(".xlsx", "").replace(".xls", "")
-                    safe_sheet_name = f"اختلاف-{safe_sheet_name}"[:31]
+                for file_obj in uploaded_files:
+                    file_name = file_obj.name
+                    clean_file_name = str(file_name).replace(".xlsx", "").replace(".xls", "")
                     
-                    group_df.drop(columns=["source_file"], errors="ignore").rename(columns=export_rename).to_excel(
-                        writer, 
-                        sheet_name=safe_sheet_name, 
-                        index=False
+                    diff_in_this_file = different_data[different_data["source_file"] == file_name]
+                    
+                    sheet_title_diff = f"بيانات مختلفة في {clean_file_name}"[:31]
+                    diff_in_this_file.drop(columns=["source_file"], errors="ignore").rename(columns=export_rename).to_excel(
+                        writer, sheet_name=sheet_title_diff, index=False
                     )
 
         output.seek(0)
 
         st.download_button(
-            label="📥 تحميل تقرير المطابقة النهائي (مع صفحات مقسمة للمفات المختلفة)",
+            label="📥 تحميل التقرير النهائي المخصص (Excel)",
             data=output,
-            file_name="تقرير_مطابقة_سداد_مقسم.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            file_name="تقرير_المطابقة_المخصص.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
 
 elif uploaded_files and len(uploaded_files) == 1:
