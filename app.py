@@ -14,7 +14,7 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files and len(uploaded_files) > 1:
-    match_cols = ["account no", "payment amount", "payment date"]
+    match_cols = ["Account No.", "Payment Amount", "Payment Date"]
     all_dfs = []
 
     for file in uploaded_files:
