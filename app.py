@@ -4,10 +4,10 @@ import streamlit as st
 from io import BytesIO
 
 st.set_page_config(page_title="استخراج السدادات الإضافية", layout="wide")
-st.title("🎯 نظام استخراج السدادات الإضافية فقط")
+st.title("🎯 نظام استخراج السدادات الإضافية (مع الحفاظ على أسماء الأعمدة الأصلية)")
 
 st.markdown("""
-الرجاء رفع الملفين المحددين لتحديد السدادات الإضافية (السدادات غير المسجلة في ملف النظام، أو المسجلة بتاريخ/مبلغ جديد):
+الرجاء رفع الملفين لتحديد السدادات الإضافية (السدادات غير المسجلة في ملف النظام، أو المسجلة بتاريخ/مبلغ جديد):
 """)
 
 col1, col2 = st.columns(2)
@@ -47,8 +47,6 @@ def smart_read_sadad_sheet(file):
     return df
 
 if system_file and extra_file:
-    match_cols = ["account no.", "payment amount", "payment date"]
-    
     rename_dict = {
         "رقم الحساب": "account no.",
         "account no": "account no.",
@@ -62,64 +60,61 @@ if system_file and extra_file:
     }
 
     try:
-        # قراءة الملفين
-        df_system = smart_read_sadad_sheet(system_file)
-        df_extra = smart_read_sadad_sheet(extra_file)
+        # قراءة الملفين كما هما
+        df_system_raw = smart_read_sadad_sheet(system_file)
+        df_extra_raw = smart_read_sadad_sheet(extra_file)
 
-        # توحيد أسماء الأعمدة للملفين
-        for df in [df_system, df_extra]:
+        # عمل نسخة مؤقتة توحد أسماء الأعمدة للقيام بذكاء المطابقة فقط
+        df_system_proc = df_system_raw.copy()
+        df_extra_proc = df_extra_raw.copy()
+
+        for df in [df_system_proc, df_extra_proc]:
             df.columns = df.columns.astype(str).str.strip().str.lower()
-            new_columns = {}
+            new_cols = {}
             for col in df.columns:
                 for key, val in rename_dict.items():
                     if key in col:
-                        new_columns[col] = val
+                        new_cols[col] = val
                         break
-            df.rename(columns=new_columns, inplace=True)
+            df.rename(columns=new_cols, inplace=True)
 
-        # التأكد من وجود الأعمدة المطلوبة
-        if all(col in df_system.columns for col in match_cols) and all(col in df_extra.columns for col in match_cols):
+        match_cols = ["account no.", "payment amount", "payment date"]
+
+        # التأكد من نجاح العثور على الأعمدة في النسخ المؤقتة
+        if all(col in df_system_proc.columns for col in match_cols) and all(col in df_extra_proc.columns for col in match_cols):
             
-            # تنظيف البيانات وتقليم المسافات
-            for df in [df_system, df_extra]:
-                df["account no."] = df["account no."].astype(str).str.strip()
-                # توحيد تنسيق التواريخ لتجنب أخطاء الفوارق الزمنية
-                df["payment date"] = pd.to_datetime(df["payment date"], errors='coerce').dt.strftime('%Y-%m-%d')
+            # تنظيف البيانات المؤقتة للمطابقة
+            df_system_proc["account no."] = df_system_proc["account no."].astype(str).str.strip()
+            df_extra_proc["account no."] = df_extra_proc["account no."].astype(str).str.strip()
 
-            # -------------------------------------------------------------
-            #  منطق الفلترة: استخراج السدادات الإضافية فقط
-            # -------------------------------------------------------------
-            # البحث عن العمليات في ملف الإضافات التي لا تملك تطابقاً كاملاً (حساب + مبلغ + تاريخ) في ملف النظام
+            df_system_proc["payment date"] = pd.to_datetime(df_system_proc["payment date"], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_extra_proc["payment date"] = pd.to_datetime(df_extra_proc["payment date"], errors='coerce').dt.strftime('%Y-%m-%d')
+
+            # الربط والمطابقة بالخلفية
             merged = pd.merge(
-                df_extra, 
-                df_system[match_cols].drop_duplicates(), 
+                df_extra_proc, 
+                df_system_proc[match_cols].drop_duplicates(), 
                 on=match_cols, 
                 how='left', 
                 indicator=True
             )
             
-            # العمليات التي تظهر في left_only هي السدادات الإضافية فقط
-            extra_payments_only = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
+            # تحديد مؤشرات الصفوف الإضافية فقط
+            extra_indexes = merged[merged['_merge'] == 'left_only'].index
 
-            st.success("✅ تم تحديد واستخراج السدادات الإضافية بنجاح!")
+            # استخراج الصفوف الإضافية من الملف الأصلي للحفاظ على الأعمدة ومسمياتها دون تغيير
+            extra_payments_original = df_extra_raw.iloc[extra_indexes].copy()
 
-            # إحصائيات سريعة
+            st.success("✅ تم استخراج السدادات الإضافية بنجاح مع الحفاظ على مسميات الأعمدة الأصلية!")
+
             c1, c2 = st.columns(2)
-            c1.metric("إجمالي عمليات ملف الإضافات", len(df_extra))
-            c2.metric("السدادات الإضافية الجديدة المكتشفة", len(extra_payments_only))
+            c1.metric("إجمالي عمليات ملف الإضافات", len(df_extra_raw))
+            c2.metric("السدادات الإضافية الجديدة المكتشفة", len(extra_payments_original))
 
-            # تجهيز مسميات التصدير
-            export_rename = {
-                "account no.": "رقم الحساب",
-                "payment amount": "مبلغ المديونية الحالي",
-                "payment date": "تاريخ السداد"
-            }
-
-            # إنشاء ملف الإكسل
+            # تصدير الملف بشيت "سدادات اضافية"
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                # الشيت الرئيسي المخصص للسدادات الإضافية فقط
-                extra_payments_only.rename(columns=export_rename).to_excel(
+                extra_payments_original.to_excel(
                     writer, 
                     sheet_name="سدادات اضافية", 
                     index=False
@@ -136,7 +131,7 @@ if system_file and extra_file:
             )
 
         else:
-            st.error("⚠️ إحدى الأعمدة المطلوبة غير موجودة في أحد الملفين. تأكد من وجود (رقم الحساب، مبلغ المديونية، تاريخ السداد).")
+            st.error("⚠️ لم نتمكن من التعرف على أعمدة المطابقة الرئيسية (الحساب، المبلغ، التاريخ). تأكد من وجودها في ورقة سداد.")
 
     except Exception as e:
         st.error(f"حدث خطأ أثناء المعالجة: {e}")
