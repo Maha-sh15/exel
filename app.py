@@ -4,7 +4,7 @@ import streamlit as st
 from io import BytesIO
 
 st.set_page_config(page_title="استخراج السدادات الإضافية", layout="wide")
-st.title("🎯 نظام استخراج السدادات الإضافية (مع الحفاظ على أسماء الأعمدة الأصلية)")
+st.title("🎯 نظام استخراج السدادات الإضافية")
 
 st.markdown("""
 الرجاء رفع الملفين لتحديد السدادات الإضافية (السدادات غير المسجلة في ملف النظام، أو المسجلة بتاريخ/مبلغ جديد):
@@ -13,7 +13,7 @@ st.markdown("""
 col1, col2 = st.columns(2)
 
 with col1:
-    system_file = st.file_uploader("1️⃣ ارفع ملف سدادات النظام (الملف الأساسي)", type=["xlsx"])
+    system_file = st.file_uploader("1️⃣ ارفع ملف السدادات (الملف الأساسي)", type=["xlsx"])
 
 with col2:
     extra_file = st.file_uploader("2️⃣ ارفع الملف الذي يحتوي على سدادات إضافية", type=["xlsx"])
@@ -105,7 +105,7 @@ if system_file and extra_file:
             # استخراج الصفوف الإضافية من الملف الأصلي للحفاظ على الأعمدة ومسمياتها دون تغيير
             extra_payments_original = df_extra_raw.iloc[extra_indexes].copy()
 
-            st.success("✅ تم استخراج السدادات الإضافية بنجاح مع الحفاظ على مسميات الأعمدة الأصلية!")
+            st.success("✅ تم استخراج السدادات الإضافية بنجاح!")
 
             c1, c2 = st.columns(2)
             c1.metric("إجمالي عمليات ملف الإضافات", len(df_extra_raw))
