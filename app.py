@@ -1,119 +1,84 @@
 import os
 import pandas as pd
+import streamlit as st
+from io import BytesIO
 
+st.set_page_config(page_title="نظام مطابقة وتسوية الإكسل", layout="wide")
+st.title("🔍 نظام مطابقة وتسوية بيانات المدفوعات عبر الملفات")
 
-def process_excel_files(file_paths, output_folder="output_results"):
-    """نظام تصنيف العملاء بناءً على التكرار وتطابق البيانات عبر ملفات إكسل متعددة."""
-    # إنشاء مجلد للمخرجات إذا لم يكن موجوداً
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+# رفع ملفات متعددة
+uploaded_files = st.file_uploader(
+    "ارفع ملفات الإكسل للمطابقة", 
+    type=["xlsx"], 
+    accept_multiple_files=True
+)
 
-    # الأعمدة الأساسية للمطابقة والمقارنة
+if uploaded_files and len(uploaded_files) > 1:
     match_cols = ["account no", "payment amount", "payment date"]
-
     all_dfs = []
 
-    # 1. قراءة جميع الملفات وتحديد مصدر كل سجل
-    for path in file_paths:
-        if not os.path.exists(path):
-            print(f"الملف غير موجود: {path}")
-            continue
+    for file in uploaded_files:
+        df = pd.read_excel(file)
+        df.columns = df.columns.astype(str).str.strip().str.lower()
+        
+        # التأكد من وجود الأعمدة
+        if all(col in df.columns for col in match_cols):
+            # تنظيف البيانات
+            df["account no"] = df["account no"].astype(str).str.strip()
+            df["source_file"] = file.name
+            all_dfs.append(df)
+        else:
+            st.warning(f"الملف {file.name} يفتقد لبعض الأعمدة المطلوبة وتم تجاهله.")
 
-        df = pd.read_excel(path)
+    if all_dfs:
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        total_files = len(all_dfs)
 
-        # توحيد أسماء الأعمدة (إزالة الفراغات وتحويلها لأحرف صغيرة لتفادي الأخطاء)
-        df.columns = df.columns.str.strip().str.lower()
+        # 1. مطابقة السجلات بالكامل
+        record_counts = (
+            combined_df.groupby(match_cols)["source_file"]
+            .nunique()
+            .reset_index(name="file_count")
+        )
+        final_df = pd.merge(combined_df, record_counts, on=match_cols, how="left")
 
-        # التأكد من وجود الأعمدة المطلوبة
-        missing_cols = [col for col in match_cols if col not in df.columns]
-        if missing_cols:
-            print(
-                f"تنبيه: الملف {path} لا يحتوي على الأعمدة التالية: {missing_cols}"
-            )
-            continue
+        # الفئة 1: موجودين في كل الملفات
+        existing_in_all = final_df[final_df["file_count"] == total_files].drop_duplicates(subset=match_cols)
 
-        # إضافة عمود لمعرفة اسم الملف الأصلي لكل سجل
-        df["source_file"] = os.path.basename(path)
-        all_dfs.append(df)
+        # الفئة 2: غير موجودين في كل الملفات (موجود في بعضها فقط)
+        not_in_all = final_df[final_df["file_count"] < total_files].drop_duplicates(subset=match_cols)
 
-    if not all_dfs:
-        print("لم يتم العثور على ملفات صالحة للمعالجة.")
-        return
+        # الفئة 3: حسابات مشتركة لكن مبالغها/تواريخها مختلفة بين الملفات
+        acc_file_count = combined_df.groupby("account no")["source_file"].nunique()
+        acc_in_multiple_files = acc_file_count[acc_file_count > 1].index
+        
+        # نأخذ الحسابات المكررة في أكثر من ملف ولكن لا تملك تطابق تام في الفئة الأولى
+        different_data = combined_df[
+            (combined_df["account no"].isin(acc_in_multiple_files)) & 
+            (~combined_df["account no"].isin(existing_in_all["account no"]))
+        ]
 
-    # دمج كل البيانات في جدول واحد كبير
-    combined_df = pd.concat(all_dfs, ignore_index=True)
+        st.success("✅ تمت عملية المطابقة بنجاح!")
 
-    # إجمالي عدد الملفات الفريدة الصالحة
-    total_files_count = len(file_paths)
+        # عرض النتائج
+        col1, col2, col3 = st.columns(3)
+        col1.metric("موجودين في كل الملفات", len(existing_in_all))
+        col2.metric("موجودين في بعض الملفات", len(not_in_all))
+        col3.metric("حسابات بها اختلافات", len(different_data))
 
-    # 2. حساب تكرار السجل المطابق تماماً عبر الملفات
-    # هنا نقوم بجمع السجلات المتطابقة تماماً في (الحساب، المبلغ، التاريخ) ونرى في كم ملف ظهرت
-    record_counts = (
-        combined_df.groupby(match_cols)["source_file"]
-        .nunique()
-        .reset_index(name="file_count")
-    )
+        # تنزيل النتائج في ملف إكسل واحد بشيتات متعددة
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            existing_in_all.drop(columns=["source_file", "file_count"], errors="ignore").to_excel(writer, sheet_name="موجود بكل الملفات", index=False)
+            not_in_all.drop(columns=["source_file", "file_count"], errors="ignore").to_excel(writer, sheet_name="موجود ببعض الملفات", index=False)
+            different_data.drop(columns=["source_file"], errors="ignore").to_excel(writer, sheet_name="بيانات مختلفة", index=False)
+        output.seek(0)
 
-    # دمج عدد الملفات مع الجدول المشترك
-    final_df = pd.merge(combined_df, record_counts, on=match_cols, how="left")
-
-    # -------------------------------------------------------------------------
-    # تصنيف الفئات الثلاث المطلوبة:
-    # -------------------------------------------------------------------------
-
-    # الفئة 1: العملاء الموجودين في كل الملفات بنفس البيانات (تكرار كامل)
-    # تظهر هذه السجلات في عدد ملفات يساوي إجمالي عدد الملفات المرفوعة
-    existing_in_all = final_df[final_df["file_count"] == total_files_count]
-
-    # الفئة 2: العملاء غير الموجودين في كامل الملفات (موجود في بعضها وغائب عن بعضها)
-    # تظهر في ملف واحد أو أكثر ولكن أقل من العدد الإجمالي للملفات
-    not_in_all = final_df[final_df["file_count"] < total_files_count]
-
-    # الفئة 3: العملاء الموجودين بالملفات ولكن بياناتهم (المبلغ أو التاريخ) مختلفة لنفس الحساب
-    # لمعرفة ذلك، نتحقق من الحسابات (account no) التي تظهر ببيانات مختلفة
-    account_variance = (
-        combined_df.groupby("account no")[["payment amount", "payment date"]]
-        .nunique()
-        .max(axis=1)
-    )
-    different_data_accounts = account_variance[account_variance > 1].index
-
-    different_data = combined_df[
-        combined_df["account no"].isin(different_data_accounts)
-    ]
-
-    # -------------------------------------------------------------------------
-    # حفظ الملفات الناتجة
-    # -------------------------------------------------------------------------
-
-    # تنظيف الأعمدة الإضافية قبل الحفظ للحفاظ على شكل الملف الأصلي
-    cols_to_drop = ["source_file", "file_count"]
-
-    existing_in_all.drop(
-        columns=cols_to_drop, errors="ignore"
-    ).drop_duplicates(subset=match_cols).to_excel(
-        os.path.join(output_folder, "1_العملاء_الموجودين_في_كل_الملفات.xlsx"),
-        index=False,
-    )
-
-    not_in_all.drop(columns=cols_to_drop, errors="ignore").drop_duplicates(
-        subset=match_cols
-    ).to_excel(
-        os.path.join(output_folder, "2_العملاء_الغير_موجودين_في_كامل_الملفات.xlsx"),
-        index=False,
-    )
-
-    different_data.drop(columns=["source_file"], errors="ignore").to_excel(
-        os.path.join(output_folder, "3_عملاء_بياناتهم_مختلفة.xlsx"), index=False
-    )
-
-    print(f"تمت العملية بنجاح! تم حفظ الملفات الثلاثة في المجلد: '{output_folder}'")
-
-
-# --- مثال على طريقة التشغيل ---
-if __name__ == "__main__":
-    # ضع هنا مسارات ملفات الإكسل الخاصة بك (يمكنك إضافة أي عدد من الملفات)
-    my_files = ["file1.xlsx", "file2.xlsx", "file3.xlsx"]
-
-    # تشغيل النظام
-    process_excel_files(my_files)
+        st.download_button(
+            label="📥 تحميل تقرير المطابقة الشامل (Excel)",
+            data=output,
+            file_name="تقرير_المطابقة_النهائي.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+elif uploaded_files and len(uploaded_files) == 1:
+    st.info("💡 يرجى رفع ملفين إكسل أو أكثر لإجراء المقارنة والمطابقة.")
