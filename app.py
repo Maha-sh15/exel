@@ -3,17 +3,23 @@ import pandas as pd
 import streamlit as st
 from io import BytesIO
 
-st.set_page_config(page_title="نظام المطابقة المتقدم", layout="wide")
-st.title("📊 نظام مطابقة المدفوعات وتصنيف الملفات التفصيلي")
+st.set_page_config(page_title="استخراج السدادات الإضافية", layout="wide")
+st.title("🎯 نظام استخراج السدادات الإضافية فقط")
 
-uploaded_files = st.file_uploader(
-    "ارفع ملفات الإكسل للمطابقة", 
-    type=["xlsx"], 
-    accept_multiple_files=True
-)
+st.markdown("""
+الرجاء رفع الملفين المحددين لتحديد السدادات الإضافية (السدادات غير المسجلة في ملف النظام، أو المسجلة بتاريخ/مبلغ جديد):
+""")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    system_file = st.file_uploader("1️⃣ ارفع ملف سدادات النظام (الملف الأساسي)", type=["xlsx"])
+
+with col2:
+    extra_file = st.file_uploader("2️⃣ ارفع الملف الذي يحتوي على سدادات إضافية", type=["xlsx"])
 
 def smart_read_sadad_sheet(file):
-    """دالة تقرأ صفحة 'سداد' فقط وتبحث فيها عن صف العناوين المناسب"""
+    """دالة تقرأ صفحة 'سداد' فقط وتتجاوز أي صفوف تعريفية في البداية"""
     excel_file = pd.ExcelFile(file)
     sheet_names = excel_file.sheet_names
     
@@ -25,7 +31,6 @@ def smart_read_sadad_sheet(file):
             
     if target_sheet is None:
         target_sheet = sheet_names[0]
-        st.warning(f"⚠️ الملف ({file.name}) لا يحتوي على صفحة باسم 'سداد'، تم قراءة الصفحة الأولى ({target_sheet}) بدلاً عنها.")
 
     preview_df = pd.read_excel(file, sheet_name=target_sheet, nrows=20, header=None)
     
@@ -41,7 +46,7 @@ def smart_read_sadad_sheet(file):
     df = pd.read_excel(file, sheet_name=target_sheet, header=header_row_index)
     return df
 
-if uploaded_files and len(uploaded_files) > 1:
+if system_file and extra_file:
     match_cols = ["account no.", "payment amount", "payment date"]
     
     rename_dict = {
@@ -56,112 +61,82 @@ if uploaded_files and len(uploaded_files) > 1:
         "payment date": "payment date"
     }
 
-    all_dfs = []
+    try:
+        # قراءة الملفين
+        df_system = smart_read_sadad_sheet(system_file)
+        df_extra = smart_read_sadad_sheet(extra_file)
 
-    for file in uploaded_files:
-        try:
-            df = smart_read_sadad_sheet(file)
+        # توحيد أسماء الأعمدة للملفين
+        for df in [df_system, df_extra]:
             df.columns = df.columns.astype(str).str.strip().str.lower()
-            
             new_columns = {}
             for col in df.columns:
                 for key, val in rename_dict.items():
                     if key in col:
                         new_columns[col] = val
                         break
-            
-            df = df.rename(columns=new_columns)
+            df.rename(columns=new_columns, inplace=True)
 
-            if all(col in df.columns for col in match_cols):
+        # التأكد من وجود الأعمدة المطلوبة
+        if all(col in df_system.columns for col in match_cols) and all(col in df_extra.columns for col in match_cols):
+            
+            # تنظيف البيانات وتقليم المسافات
+            for df in [df_system, df_extra]:
                 df["account no."] = df["account no."].astype(str).str.strip()
-                df["source_file"] = file.name
-                all_dfs.append(df)
-            else:
-                st.warning(f"⚠️ الملف ({file.name}) - صفحة 'سداد' لم نجد فيها الأعمدة المطلوبة.")
-        except Exception as e:
-            st.error(f"حدث خطأ أثناء قراءة الملف {file.name}: {e}")
+                # توحيد تنسيق التواريخ لتجنب أخطاء الفوارق الزمنية
+                df["payment date"] = pd.to_datetime(df["payment date"], errors='coerce').dt.strftime('%Y-%m-%d')
 
-    if all_dfs:
-        combined_df = pd.concat(all_dfs, ignore_index=True)
-        total_files = len(all_dfs)
-
-        # 1. مطابقة البيانات المكتملة بالتفصيل
-        record_counts = (
-            combined_df.groupby(match_cols)["source_file"]
-            .nunique()
-            .reset_index(name="file_count")
-        )
-        final_df = pd.merge(combined_df, record_counts, on=match_cols, how="left")
-
-        # أ) بيانات متطابقة تماماً بكل الملفات
-        existing_in_all = final_df[final_df["file_count"] == total_files].drop_duplicates(subset=match_cols)
-
-        # ب) تحديد الحسابات الفريدة وتواجدها حسب الملفات
-        account_presence = combined_df.groupby("account no.")["source_file"].unique().to_dict()
-        
-        # ج) تحديد الحسابات ذات البيانات المختلفة (توجد في أكثر من ملف ولكن بمبالغ/تواريخ مختلفة)
-        acc_file_count = combined_df.groupby("account no.")["source_file"].nunique()
-        acc_in_multiple_files = acc_file_count[acc_file_count > 1].index
-        
-        different_data = combined_df[
-            (combined_df["account no."].isin(acc_in_multiple_files)) & 
-            (~combined_df["account no."].isin(existing_in_all["account no."]))
-        ]
-
-        st.success("✅ تم تصنيف البيانات بدقة وإنشاء التقرير بالتسميات المطلوبة!")
-
-        export_rename = {
-            "account no.": "Account No.",
-            "payment amount": "Payment Amount",
-            "payment date": "Payment Date"
-        }
-
-        # بناء ملف الإكسل النهائي
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            
-            # 1. الشيت الرئيسي: بيانات بكل الملفات
-            existing_in_all.drop(columns=["source_file", "file_count"], errors="ignore").rename(columns=export_rename).to_excel(
-                writer, sheet_name="بيانات بكل الملفات", index=False
+            # -------------------------------------------------------------
+            #  منطق الفلترة: استخراج السدادات الإضافية فقط
+            # -------------------------------------------------------------
+            # البحث عن العمليات في ملف الإضافات التي لا تملك تطابقاً كاملاً (حساب + مبلغ + تاريخ) في ملف النظام
+            merged = pd.merge(
+                df_extra, 
+                df_system[match_cols].drop_duplicates(), 
+                on=match_cols, 
+                how='left', 
+                indicator=True
             )
             
-            # 2. الشيتات الفرعية: بيانات توجد في (اسم الملف) فقط
-            for file_obj in uploaded_files:
-                file_name = file_obj.name
-                clean_file_name = str(file_name).replace(".xlsx", "").replace(".xls", "")
-                
-                # تصفية الحسابات التي لم تظهر سوى في هذا الملف حصراً
-                only_in_this_file = combined_df[
-                    combined_df["account no."].apply(lambda acc: list(account_presence.get(acc, [])) == [file_name])
-                ]
-                
-                sheet_title_only = f"بيانات في {clean_file_name} فقط"[:31]
-                only_in_this_file.drop(columns=["source_file"], errors="ignore").rename(columns=export_rename).to_excel(
-                    writer, sheet_name=sheet_title_only, index=False
+            # العمليات التي تظهر في left_only هي السدادات الإضافية فقط
+            extra_payments_only = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
+
+            st.success("✅ تم تحديد واستخراج السدادات الإضافية بنجاح!")
+
+            # إحصائيات سريعة
+            c1, c2 = st.columns(2)
+            c1.metric("إجمالي عمليات ملف الإضافات", len(df_extra))
+            c2.metric("السدادات الإضافية الجديدة المكتشفة", len(extra_payments_only))
+
+            # تجهيز مسميات التصدير
+            export_rename = {
+                "account no.": "رقم الحساب",
+                "payment amount": "مبلغ المديونية الحالي",
+                "payment date": "تاريخ السداد"
+            }
+
+            # إنشاء ملف الإكسل
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                # الشيت الرئيسي المخصص للسدادات الإضافية فقط
+                extra_payments_only.rename(columns=export_rename).to_excel(
+                    writer, 
+                    sheet_name="سدادات اضافية", 
+                    index=False
                 )
 
-            # 3. الشيتات الفرعية: بيانات مختلفة في (اسم الملف)
-            if not different_data.empty:
-                for file_obj in uploaded_files:
-                    file_name = file_obj.name
-                    clean_file_name = str(file_name).replace(".xlsx", "").replace(".xls", "")
-                    
-                    diff_in_this_file = different_data[different_data["source_file"] == file_name]
-                    
-                    sheet_title_diff = f"بيانات مختلفة في {clean_file_name}"[:31]
-                    diff_in_this_file.drop(columns=["source_file"], errors="ignore").rename(columns=export_rename).to_excel(
-                        writer, sheet_name=sheet_title_diff, index=False
-                    )
+            output.seek(0)
 
-        output.seek(0)
+            st.download_button(
+                label="📥 تحميل شيت (سدادات اضافية)",
+                data=output,
+                file_name="تقرير_السدادات_الإضافية.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
-        st.download_button(
-            label="📥 تحميل التقرير النهائي المخصص (Excel)",
-            data=output,
-            file_name="تقرير_المطابقة_المخصص.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        else:
+            st.error("⚠️ إحدى الأعمدة المطلوبة غير موجودة في أحد الملفين. تأكد من وجود (رقم الحساب، مبلغ المديونية، تاريخ السداد).")
 
-elif uploaded_files and len(uploaded_files) == 1:
-    st.info("💡 يرجى رفع ملفين إكسل أو أكثر لإجراء المقارنة والمطابقة.")
+    except Exception as e:
+        st.error(f"حدث خطأ أثناء المعالجة: {e}")
